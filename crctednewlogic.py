@@ -20,6 +20,8 @@ from dateutil.parser import parse
 import logging
 
 # Configure logging
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Constants
@@ -91,12 +93,11 @@ def get_secret(secret_name):
     return get_secret_value_response
 
 def get_redshift_connection():
+    
     try:
-        # Safely get environment variables with defaults
-        environment = os.environ.get('Environment', 'bobcat')  # Default to 'bobcat' if not set
-        logging.info(f"Environment: {environment}")
+        environment = os.environ('Environment')  
+        print("Environment: "+ environment)
         
-        # Set configuration based on environment
         if environment == "bobcat":
             os.environ['configbucket'] = 'fca-dev-mm-emr-config'
             os.environ['configfile'] = 'SEC_Config_DEV.json'
@@ -104,33 +105,25 @@ def get_redshift_connection():
             os.environ['configbucket'] = 'fca-sit-mm-emr-config'
             os.environ['configfile'] = 'SEC_Config_SIT.json'
         elif environment == "lynx":
-            os.environ['configbucket'] = 'fca-pre-prod-euw-emr-config'
-            os.environ['configfile'] = 'TR_Config_PREPROD.json'
+            os.environ['configbucket'] = 'fca-pre-prod-euw-deployable'
+            os.environ['configfile'] = 'emirrefit/lambda/TR_Config_PREPROD.json'
         elif environment == "panther":
             os.environ['configbucket'] = 'fca-prod-euw-emr-config'
             os.environ['configfile'] = 'SEC_Config_PROD.json'
-        else:
-            raise ValueError(f"Unsupported environment: {environment}")
 
-        # Use os.getenv for region_name with a fallback
-        os.environ['region_name'] = os.getenv('REGION', 'eu-west-1')
+        
+        os.environ['region_name'] = os.getenv('REGION')
         s3 = boto3.resource('s3', region_name=os.getenv('region_name'), use_ssl=True)
-        logging.info(f"Config Bucket Name: {os.getenv('configbucket')}")
+        logging.info(f"Config Bucket Name:"+ {os.getenv('configbucket')}")
 
-        # Fetch config from S3 with error handling
-        try:
-            obj = s3.Object(os.getenv('configbucket'), os.getenv('configfile'))
-            filedata = obj.get()['Body'].read()
-            contents = filedata.decode('utf-8')
-            cfg_json_dict = json.loads(contents)
-            if not isinstance(cfg_json_dict, dict) or 'config' not in cfg_json_dict:
-                raise ValueError("Invalid configuration JSON: 'config' key not found or JSON is malformed")
-        except json.JSONDecodeError as je:
-            logging.error(f"JSON parsing error in config file {os.getenv('configfile')}: {je}")
-            raise ValueError(f"Invalid JSON format in {os.getenv('configfile')}: {je}")
-        except Exception as e:
-            logging.error(f"Error fetching or reading config file from S3 bucket {os.getenv('configbucket')}/{os.getenv('configfile')}: {e}")
-            raise ValueError(f"Failed to access S3 config: {e}")
+        
+        obj = s3.Object(os.getenv('configbucket'), os.getenv('configfile'))
+        filedata = obj.get()['Body'].read()
+        contents = filedata.decode('utf-8')
+        cfg_json_dict = json.loads(contents)
+        if not isinstance(cfg_json_dict, dict) or 'config' not in cfg_json_dict:
+            raise ValueError("Invalid configuration JSON: 'config' key not found or JSON is malformed")
+        
 
         # Fetch Redshift credentials from Secrets Manager
         secret_name = cfg_json_dict['config']['RedshiftSecretName']
