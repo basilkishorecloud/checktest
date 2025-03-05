@@ -23,9 +23,10 @@ import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Constants
-REDSHIFT_CONFIG_TABLE = "red_main_emir.tr_emir_filerecon_configdetails"  # Hardcoded schema and table for config
+REDSHIFT_CONFIG_TABLE = "red_main_emir.tr_emir_filerecon_configdetails"  # Hardcoded schema and table, assuming in mm-lynx database
+REDSHIFT_DATABASE = "mm-lynx"  # Specify the correct Redshift database here
 
-# S3 and boto3 initialization (removed unnecessary S3 client for bucket checks)
+# S3 and boto3 initialization
 s3 = boto3.resource('s3', region_name=os.getenv('region_name', 'eu-west-1'), use_ssl=True)
 
 bc_session = bc.get_session()
@@ -116,13 +117,20 @@ def get_redshift_connection():
         s3 = boto3.resource('s3', region_name=os.getenv('region_name'), use_ssl=True)
         logging.info(f"Config Bucket Name: {os.getenv('configbucket')}")
 
-        # Fetch config from S3
-        obj = s3.Object(os.getenv('configbucket'), os.getenv('configfile'))
-        filedata = obj.get()['Body'].read()
-        contents = filedata.decode('utf-8')
-        cfg_json_dict = json.loads(contents)
-        if not isinstance(cfg_json_dict, dict) or 'config' not in cfg_json_dict:
-            raise ValueError("Invalid configuration JSON: 'config' key not found or JSON is malformed")
+        # Fetch config from S3 with error handling
+        try:
+            obj = s3.Object(os.getenv('configbucket'), os.getenv('configfile'))
+            filedata = obj.get()['Body'].read()
+            contents = filedata.decode('utf-8')
+            cfg_json_dict = json.loads(contents)
+            if not isinstance(cfg_json_dict, dict) or 'config' not in cfg_json_dict:
+                raise ValueError("Invalid configuration JSON: 'config' key not found or JSON is malformed")
+        except json.JSONDecodeError as je:
+            logging.error(f"JSON parsing error in config file {os.getenv('configfile')}: {je}")
+            raise ValueError(f"Invalid JSON format in {os.getenv('configfile')}: {je}")
+        except Exception as e:
+            logging.error(f"Error fetching or reading config file from S3 bucket {os.getenv('configbucket')}/{os.getenv('configfile')}: {e}")
+            raise ValueError(f"Failed to access S3 config: {e}")
 
         # Fetch Redshift credentials from Secrets Manager
         secret_name = cfg_json_dict['config']['RedshiftSecretName']
@@ -141,15 +149,15 @@ def get_redshift_connection():
         obj_EncryptDecryptCode = EncryptDecryptCode(decdbase64_Key)
         decoded_RedshiftPassword = obj_EncryptDecryptCode.decrypt(DatabasePassword)
 
-        # Set environment variables for Redshift connection
-        os.environ['DatabaseLogin'] = json_redshift['Database']
+        # Set environment variables for Redshift connection, ensuring the correct database
+        os.environ['DatabaseLogin'] = REDSHIFT_DATABASE  # Use the specified Redshift database (mm-lynx)
         os.environ['decoded_RedshiftPassword'] = decoded_RedshiftPassword
         os.environ['DatabaseServer'] = str(json_redshift['Server'])
         os.environ['DatabaseUser'] = str(json_redshift['username'])
         os.environ['DatabasePort'] = str(json_redshift['Port'])
 
-        # Fetch config and SQL details from the hardcoded Redshift table
-        details_query = f"select key, value from {REDSHIFT_CONFIG_TABLE} where active_flag=true"
+        # Fetch config and SQL details from the hardcoded Redshift table in the correct database
+        details_query = f"SELECT key, value FROM {REDSHIFT_CONFIG_TABLE} WHERE active_flag=true"
 
         try:
             # Use cursor to fetch results directly
@@ -172,7 +180,7 @@ def get_redshift_connection():
             logging.error(f"Error fetching Config and SQL Details from Redshift: {error}")
             raise Exception("ERROR: Issue in fetching Config and SQL Details from Redshift")
 
-        # Return the connection object for use in other functions
+        # Return the connection object for use in other functions, using the correct database
         connection = psycopg2.connect(
             user=os.getenv('DatabaseUser'),
             password=os.getenv('decoded_RedshiftPassword'),
@@ -262,7 +270,7 @@ def fetch_config(redshift_conn, config_table_name="red_main_emir.tr_emir_filerec
         raise ValueError("Redshift connection is not established")
     
     try:
-        results = redshift_connect(redshift_conn, f"SELECT key, value FROM {config_table_name}")
+        results = redshift_connect(redshift_conn, f"SELECT key, value FROM {config_table_name} WHERE active_flag=true")
         config = {row[0]: str(row[1]).strip("[]'\"") for row in results}  # Remove any brackets or quotes
 
         logging.info(f"Loaded config from {config_table_name}: {config}")
@@ -351,7 +359,7 @@ def update_permanent_recon_table(redshift_conn, config, trade_dates):
                 WHERE file_timestamp::date IN ('{yesterday_str}', '{today_str}')
                 UNION ALL
                 SELECT file_name, file_type, file_timestamp, firm, datatype, trade_date
-                FROM {main_schema}.{main_table}
+                FROM {config['main_schema']}.{main_table}
                 WHERE file_timestamp::date IN ('{yesterday_str}', '{today_str}')
                 """
                 redshift_connect_execute(redshift_conn, insert_sql)
@@ -398,7 +406,7 @@ def parse_file_name(file_name):
         trade_date = parts[4]  # 250303 (yymmdd)
         part_info = parts[5].split('-')[0]  # 001001
         total_parts = int(part_info[:3])  # 001 (expected parts)
-        sequence_number = int(part_info[3:])  # 001 (sequence number)
+        sequence_number = int(part_info[3:])  # 001 (sequence_number)
         parsed = {
             "firm": firm,
             "datatype": datatype,
