@@ -97,7 +97,6 @@ def get_redshift_connection():
     try:
         environment = os.environ('Environment')  
         print("Environment: "+ environment)
-        
         if environment == "bobcat":
             os.environ['configbucket'] = 'fca-dev-mm-emr-config'
             os.environ['configfile'] = 'SEC_Config_DEV.json'
@@ -110,13 +109,13 @@ def get_redshift_connection():
         elif environment == "panther":
             os.environ['configbucket'] = 'fca-prod-euw-emr-config'
             os.environ['configfile'] = 'SEC_Config_PROD.json'
+        else:
+            raise ValueError(f"Unsupported environment: {environment}")
 
-        
         os.environ['region_name'] = os.getenv('REGION')
         s3 = boto3.resource('s3', region_name=os.getenv('region_name'), use_ssl=True)
-        logging.info(f"Config Bucket Name:"+ {os.getenv('configbucket')}")
-
-        
+        logging.info(f"Config Bucket Name: {os.getenv('configbucket')}")
+     
         obj = s3.Object(os.getenv('configbucket'), os.getenv('configfile'))
         filedata = obj.get()['Body'].read()
         contents = filedata.decode('utf-8')
@@ -124,7 +123,6 @@ def get_redshift_connection():
         if not isinstance(cfg_json_dict, dict) or 'config' not in cfg_json_dict:
             raise ValueError("Invalid configuration JSON: 'config' key not found or JSON is malformed")
         
-
         # Fetch Redshift credentials from Secrets Manager
         secret_name = cfg_json_dict['config']['RedshiftSecretName']
         SecretDetails = get_secret(secret_name)
@@ -569,6 +567,7 @@ def insert_count_logs(redshift_conn, report_data, count_logs_table):
         raise
     finally:
         cursor.close()
+
 
 def send_email(smtp_credentials, subject, intro_text, report_html, end_quote, config):
     try:
