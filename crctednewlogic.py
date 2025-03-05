@@ -152,72 +152,83 @@ def get_redshift_connection():
         details_query = f"select key, value from {REDSHIFT_CONFIG_TABLE} where active_flag=true"
 
         try:
-            details_dataframe = redshift_connect(
-                os.getenv('DatabaseServer'),
-                os.getenv('DatabaseLogin'),
-                os.getenv('DatabaseUser'),
-                os.getenv('decoded_RedshiftPassword'),
-                os.getenv('DatabasePort'),
-                details_query
+            # Use cursor to fetch results directly
+            connection = psycopg2.connect(
+                user=os.getenv('DatabaseUser'),
+                password=os.getenv('decoded_RedshiftPassword'),
+                host=os.getenv('DatabaseServer'),
+                port=os.getenv('DatabasePort'),
+                database=os.getenv('DatabaseLogin')
             )
-            for row in details_dataframe.itertuples(index=False):
-                os.environ[row.key] = row.value
+            cursor = connection.cursor()
+            cursor.execute(details_query)
+            results = cursor.fetchall()
+            for row in results:
+                os.environ[row[0]] = row[1]
+            cursor.close()
+            connection.close()
             
         except Exception as error:
             logging.error(f"Error fetching Config and SQL Details from Redshift: {error}")
             raise Exception("ERROR: Issue in fetching Config and SQL Details from Redshift")
 
         # Return the connection object for use in other functions
-        connection = redshift_connect(
-            os.getenv('DatabaseServer'),
-            os.getenv('DatabaseLogin'),
-            os.getenv('DatabaseUser'),
-            os.getenv('decoded_RedshiftPassword'),
-            os.getenv('DatabasePort'),
-            f"SELECT key, value FROM {REDSHIFT_CONFIG_TABLE}"
+        connection = psycopg2.connect(
+            user=os.getenv('DatabaseUser'),
+            password=os.getenv('decoded_RedshiftPassword'),
+            host=os.getenv('DatabaseServer'),
+            port=os.getenv('DatabasePort'),
+            database=os.getenv('DatabaseLogin')
         )
-        config = {row[0]: row[1] for row in connection.fetchall()}
-        connection.close()  # Close the cursor, but return the connection if needed
         return connection  # Return the psycopg2 connection object
 
     except Exception as e:
         logging.error(f"Error in Redshift connection: {e}")
         raise
 
-def redshift_connect(host, database, user, password, port, query):
+def redshift_connect(redshift_conn, query):
+    """
+    Execute a Redshift query using the provided connection and return results.
+    Returns a cursor with results that can use fetchall().
+    """
     start_time_redshift_connect = time.time()
     query_str = query
 
-    connection = psycopg2.connect(user=user,
-                                 password=password,
-                                 host=host,
-                                 port=port,
-                                 database=database)
-    redshiftCursor = connection.cursor()
-    redshiftCursor.execute(query_str)
-    res_df = pd.DataFrame(redshiftCursor.fetchall(), columns=[desc[0] for desc in redshiftCursor.description])
-    while redshiftCursor.rowcount is None:
-        time.sleep(5)  # Use time.sleep instead of sleep for clarity
-    logging.info("End of query execution. Total time taken {}secs".format(time.time() - start_time_redshift_connect))
-    return res_df
+    try:
+        cursor = redshift_conn.cursor()
+        cursor.execute(query_str)
+        while cursor.rowcount is None:
+            time.sleep(5)  # Wait for query to complete if needed
+        results = cursor.fetchall()
+        logging.info("End of query execution. Total time taken {}secs".format(time.time() - start_time_redshift_connect))
+        return results  # Return query results as a list of tuples
+    except Exception as e:
+        logging.error(f"Error executing Redshift query: {e}")
+        raise
+    finally:
+        cursor.close()
 
-def redshift_connect_execute(host, database, user, password, port, query):
+def redshift_connect_execute(redshift_conn, query):
+    """
+    Execute a Redshift query (e.g., INSERT, UPDATE, DELETE) and commit.
+    """
     start_time_redshift_connect = time.time()
     query_str = query
 
-    connection = psycopg2.connect(user=user,
-                                 password=password,
-                                 host=host,
-                                 port=port,
-                                 database=database)
-    redshiftCursor = connection.cursor()
-    redshiftCursor.execute(query_str)
-    while redshiftCursor.rowcount is None:
-        time.sleep(5)
-    connection.commit()
-    end_time_redshift_connect = time.time()
-    logging.info("End of redshift_connect_execute function. Total time taken {}secs".format(end_time_redshift_connect - start_time_redshift_connect))
-    return redshiftCursor
+    try:
+        cursor = redshift_conn.cursor()
+        cursor.execute(query_str)
+        while cursor.rowcount is None:
+            time.sleep(5)
+        redshift_conn.commit()
+        end_time_redshift_connect = time.time()
+        logging.info("End of redshift_connect_execute function. Total time taken {}secs".format(end_time_redshift_connect - start_time_redshift_connect))
+    except Exception as e:
+        redshift_conn.rollback()
+        logging.error(f"Error executing Redshift query: {e}")
+        raise
+    finally:
+        cursor.close()
 
 class EncryptDecryptCode:
     def __init__(self, key):
@@ -250,13 +261,9 @@ def fetch_config(redshift_conn, config_table_name="red_main_emir.tr_emir_filerec
     if not redshift_conn:
         raise ValueError("Redshift connection is not established")
     
-    cursor = redshift_conn.cursor()
     try:
-        config = {}
-        cursor.execute(f"SELECT key, value FROM {config_table_name}")
-        for row in cursor.fetchall():
-            # Store values directly from the table, ensuring clean strings
-            config[row[0]] = str(row[1]).strip("[]'\"")  # Remove any brackets or quotes
+        results = redshift_connect(redshift_conn, f"SELECT key, value FROM {config_table_name}")
+        config = {row[0]: str(row[1]).strip("[]'\"") for row in results}  # Remove any brackets or quotes
 
         logging.info(f"Loaded config from {config_table_name}: {config}")
 
@@ -275,18 +282,12 @@ def fetch_config(redshift_conn, config_table_name="red_main_emir.tr_emir_filerec
             raise ValueError(f"Missing required configuration parameters in {config_table_name}: {missing_params}")
 
         return config
-    except psycopg2.Error as e:
-        logging.error(f"Database error fetching config from {config_table_name}: {e}")
-        raise
     except Exception as e:
         logging.error(f"Error fetching config from {config_table_name}: {e}")
         raise
-    finally:
-        cursor.close()
 
 def update_permanent_recon_table(redshift_conn, config, trade_dates):
     try:
-        cursor = redshift_conn.cursor()
         main_schema = config['main_schema']  # Fetch from config table
         permanent_table_name = config['permanent_recon_table']  # Fetch from config table
         
@@ -301,10 +302,10 @@ def update_permanent_recon_table(redshift_conn, config, trade_dates):
             trade_date VARCHAR
         )
         """
-        cursor.execute(create_table_sql)
+        redshift_connect_execute(redshift_conn, create_table_sql)
 
         # Truncate (clear) the permanent table before repopulating
-        cursor.execute(f"TRUNCATE TABLE {main_schema}.{permanent_table_name}")
+        redshift_connect_execute(redshift_conn, f"TRUNCATE TABLE {main_schema}.{permanent_table_name}")
 
         # Get today and yesterday dates in YYYY-MM-DD format
         today = datetime.now().date()
@@ -353,19 +354,15 @@ def update_permanent_recon_table(redshift_conn, config, trade_dates):
                 FROM {main_schema}.{main_table}
                 WHERE file_timestamp::date IN ('{yesterday_str}', '{today_str}')
                 """
-                cursor.execute(insert_sql)
+                redshift_connect_execute(redshift_conn, insert_sql)
                 logging.info(f"Inserted data for {firm}/{datatype} with timestamps from {yesterday_str} and {today_str} into permanent table in {main_schema}")
 
-        redshift_conn.commit()
     except Exception as e:
         logging.error(f"Error updating permanent recon table: {e}")
         raise
-    finally:
-        cursor.close()
 
 def fetch_file_names(redshift_conn, schema, table, trade_date):
     try:
-        cursor = redshift_conn.cursor()
         # Get today and yesterday dates in YYYY-MM-DD format
         today = datetime.now().date()
         yesterday = today - timedelta(days=1)
@@ -374,13 +371,13 @@ def fetch_file_names(redshift_conn, schema, table, trade_date):
 
         logging.info(f"Fetching files for trade_date: {trade_date}, checking today: {today_str} and yesterday: {yesterday_str}")
         
-        cursor.execute(f"""
+        query = f"""
             SELECT file_name FROM {schema}.{table}
             WHERE file_timestamp::date IN ('{yesterday_str}', '{today_str}')
-        """)
-        files = [row[0] for row in cursor.fetchall()]
+        """
+        results = redshift_connect(redshift_conn, query)
+        files = [row[0] for row in results]
         logging.info(f"Found files: {files}")
-        cursor.close()
         return files
     except Exception as e:
         logging.error(f"Error fetching file names from {schema}.{table}: {e}")
@@ -566,6 +563,7 @@ def insert_count_logs(redshift_conn, report_data, count_logs_table):
         redshift_conn.commit()
         logging.info("Count logs inserted successfully into Redshift.")
     except Exception as e:
+        redshift_conn.rollback()
         logging.error(f"Error inserting count logs into Redshift: {e}")
         raise
     finally:
